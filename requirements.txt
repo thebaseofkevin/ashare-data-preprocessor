@@ -1,0 +1,4 @@
+baostock
+pandas
+sqlalchemy
+yfinance
