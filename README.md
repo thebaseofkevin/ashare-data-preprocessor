@@ -28,25 +28,25 @@ pip install -r requirements.txt
    ```
    输出示例：`2026-03-13_153012_stocks_info.db`，这个数据库的结构如下：
    ``` csv
-    "code",        # 股票代码
-    "code_name",   # 股票名称
-    "ipoDate",     # IPO时间
-    "industry",    # 所属行业
-    "website",     # 公司官网
-    "total_share", # 总股本
-    "market_cap",  # 市值
-    "price",       # 收盘价
-    "pe",          # 市盈率
-    "pb",          # 市净率
-    "roe",         # ROE
-    "eps",         # 每股收益
-    "bps",         # 每股净资产
-    "cash",        # 现金总额
-    "short_term_borrowing",  # 短期借款（兼容多个标签）
-    "gross_profit_margin",   # 毛利率
-    "net_profit",# 净利润
-    "operating_cash_flow",   # 经营现金流
-    "investment_cash_flow",  # 投资现金流
+   "code",        # 股票代码
+   "code_name",   # 股票名称
+   "ipoDate",     # IPO时间
+   "industry",    # 所属行业
+   "website",     # 公司官网
+   "total_share", # 总股本
+   "market_cap",  # 市值
+   "price",       # 当前股价
+   "pe",          # 市盈率
+   "pb",          # 市净率
+   "roe",         # ROE
+   "eps",         # 每股收益
+   "bps",         # 每股净资产
+   "cash",        # 现金
+   "short_term_borrowing", # 短期借款（兼容多个标签）
+   "gross_profit_margin",  # 毛利率
+   "net_profit",           # 净利润
+   "operating_cash_flow",  # 经营现金流
+   "investment_cash_flow", # 投资现金流（兼容多个标签）
    ```
 
 ## 输出字段

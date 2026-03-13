@@ -2,6 +2,7 @@
 import os
 import datetime
 import pandas as pd
+from pandas.api.types import is_scalar
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import random
 import time
@@ -137,20 +138,18 @@ def fetch_yahoo(code: str):
     result["roe"] = info.get("returnOnEquity")            # ROE
     result["eps"] = info.get("trailingEps")               # 每股收益
     result["bps"] = info.get("bookValue")                 # 每股净资产
-    result["cash"] = info.get("totalCash")                # 现金总额
-    # 收盘价：优先用 fast_info 的上一收盘价，再回退到 info
-    price = None
-    if isinstance(fast_info, dict):
-        price = fast_info.get("previous_close")
-        if price is None:
-            price = fast_info.get("regularMarketPreviousClose")
-    else:
-        price = getattr(fast_info, "previous_close", None)
-        if price is None:
-            price = getattr(fast_info, "regularMarketPreviousClose", None)
-    if price is None:
-        price = info.get("regularMarketPreviousClose")
-    result["price"] = price
+    # 现金总额：优先用资产负债表里的现金与现金等价物
+    net_cash = None
+    if not balance_sheet.empty and "Cash And Cash Equivalents" in balance_sheet.index:
+        try:
+            net_cash = balance_sheet.loc["Cash And Cash Equivalents"].iloc[0]
+        except Exception:
+            net_cash = None
+    if net_cash is None:
+        net_cash = info.get("totalCash")
+    result["cash"] = net_cash
+    # 当前股价：直接取 info 的 currentPrice
+    result["price"] = info.get("currentPrice")
     # 短期借款：不同股票字段名可能不同，做多标签兼容
     if not balance_sheet.empty:
         loan_labels = [
@@ -191,8 +190,9 @@ def fetch_yahoo(code: str):
                 margin = gross_profit / total_revenue
                 # 毛利率按百分比字符串保存，例如 20%
                 result["gross_profit_margin"] = f"{margin:.0%}"
-        if "Net Income" in income_stmt.index:
-            result["net_profit"] = income_stmt.loc["Net Income"].iloc[0] # 净利润
+        # 净利润
+        if "Net Income Continuous Operations" in income_stmt.index:
+            result["net_profit"] = income_stmt.loc["Net Income Continuous Operations"].iloc[0]
     # 现金流：运营/投资现金流字段名称兼容
     if not cashflow.empty:
         if "Operating Cash Flow" in cashflow.index:
@@ -256,7 +256,7 @@ def main():
         "website", # 公司官网
         "total_share", # 总股本
         "market_cap",# 市值
-        "price", # 收盘价
+        "price", # 当前股价
         "pe",# 市盈率
         "pb",# 市净率
         "roe",# ROE
@@ -267,7 +267,7 @@ def main():
         "gross_profit_margin", # 毛利率
         "net_profit",# 净利润
         "operating_cash_flow",# 经营现金流
-        "investment_cash_flow",# 投资现金流
+        "investment_cash_flow",# 投资现金流（兼容多个标签）
     ]
     for col in yahoo_cols:
         if col not in df.columns:
@@ -275,6 +275,8 @@ def main():
 
     # 数字格式化：支持数值与可转数字的字符串
     def _format_num(val):
+        if not is_scalar(val):
+            return val
         if pd.isna(val):
             return val
         # handle numeric-like strings as well as numbers
@@ -339,15 +341,9 @@ def main():
                 print(f"processed {processed} rows, sleeping 30 seconds...")
                 time.sleep(30)
             if processed % 1000 == 0:
-                print(f"processed {processed} rows, sleeping 120 seconds...")
+                print(f"processed {processed} rows, sleeping 60 seconds...")
                 time.sleep(60)
 
-    for col in df.columns:
-        df[col] = df[col].apply(_format_num)
-
-    # 写入最终数据库
-    engine_out = create_engine(f"sqlite:///{output_db}")
-    df.to_sql("stocks", engine_out, if_exists="replace", index=False)
     print(f"yahoo data filled for {yahoo_hits}/{total} rows")
     if yahoo_errors:
         print("sample yahoo errors:")
