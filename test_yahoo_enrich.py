@@ -31,13 +31,16 @@ class TestYahooEnrich(unittest.TestCase):
         mock_ticker.get_info.return_value = {
             "website": "http://example.com",
             "sharesOutstanding": 1000000,
+            "marketCap": 200000000,
             "trailingPE": 15.5,
             "priceToBook": 2.0,
             "returnOnEquity": 0.1,
             "trailingEps": 1.5,
             "bookValue": 10.0,
-            "totalCash": 500000
+            "totalCash": 500000,
+            "regularMarketPreviousClose": 12.30
         }
+        mock_ticker.fast_info = {"previous_close": 12.30}
         mock_ticker.balance_sheet = MagicMock()
         mock_ticker.balance_sheet.empty = False
         mock_ticker.balance_sheet.index = ["Short Term Debt"]
@@ -85,6 +88,8 @@ class TestYahooEnrich(unittest.TestCase):
         self.assertIsInstance(data, dict)
         self.assertEqual(data["website"], "http://example.com")
         self.assertEqual(data["total_share"], 1000000)
+        self.assertEqual(data["market_cap"], 200000000)
+        self.assertEqual(data["price"], 12.30)
         self.assertEqual(data["pe"], 15.5)
         self.assertEqual(data["pb"], 2.0)
         self.assertEqual(data["roe"], 0.1)

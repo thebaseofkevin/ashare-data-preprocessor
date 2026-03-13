@@ -95,6 +95,10 @@ def fetch_yahoo(code: str):
                     info = tk.get_info() or {}
                 else:
                     info = tk.info or {}
+                try:
+                    fast_info = tk.fast_info
+                except Exception:
+                    fast_info = {}
                 # 拉取财报数据（资产负债表、利润表、现金流表）
                 balance_sheet = tk.balance_sheet
                 income_stmt = tk.financials
@@ -126,45 +130,73 @@ def fetch_yahoo(code: str):
     result = {}
     # 映射需要的字段
     result["website"] = info.get("website")
-    result["total_share"] = info.get("sharesOutstanding")
-    result["pe"] = info.get("trailingPE")
-    result["pb"] = info.get("priceToBook")
-    result["roe"] = info.get("returnOnEquity")
-    result["eps"] = info.get("trailingEps")
-    result["bps"] = info.get("bookValue")
-    result["cash"] = info.get("totalCash")
+    result["total_share"] = info.get("sharesOutstanding") # 总股本
+    result["market_cap"] = info.get("marketCap")          # 市值
+    result["pe"] = info.get("trailingPE")                 # 市盈率
+    result["pb"] = info.get("priceToBook")                # 市净率
+    result["roe"] = info.get("returnOnEquity")            # ROE
+    result["eps"] = info.get("trailingEps")               # 每股收益
+    result["bps"] = info.get("bookValue")                 # 每股净资产
+    result["cash"] = info.get("totalCash")                # 现金总额
+    # 收盘价：优先用 fast_info 的上一收盘价，再回退到 info
+    price = None
+    if isinstance(fast_info, dict):
+        price = fast_info.get("previous_close")
+        if price is None:
+            price = fast_info.get("regularMarketPreviousClose")
+    else:
+        price = getattr(fast_info, "previous_close", None)
+        if price is None:
+            price = getattr(fast_info, "regularMarketPreviousClose", None)
+    if price is None:
+        price = info.get("regularMarketPreviousClose")
+    result["price"] = price
     # 短期借款：不同股票字段名可能不同，做多标签兼容
     if not balance_sheet.empty:
-        short_term_labels = [
-            "Short Term Debt",
-            "Short Term Borrowings",
+        loan_labels = [
             "Short Term Loans",
+            "Short Term Debt",
+            "Current Debt",
+            "Short Term Bank Debt",
+            "Short/Long Term Debt",
+            "Short Long Term Debt",
+        ]
+        borrowing_labels = [
+            "Short Term Borrowings",
+            "Short Term Debt",
             "Current Debt",
             "Short/Long Term Debt",
             "Short Long Term Debt",
-            "Short Term Bank Debt",
         ]
-        st_value = None
-        for label in short_term_labels:
+        loan_value = None
+        borrowing_value = None
+        for label in loan_labels:
             if label in balance_sheet.index:
-                st_value = balance_sheet.loc[label].iloc[0]
+                loan_value = balance_sheet.loc[label].iloc[0]
                 break
-        if st_value is not None:
-            result["short_term_loan"] = st_value
-            result["short_term_borrowing"] = st_value
+        for label in borrowing_labels:
+            if label in balance_sheet.index:
+                borrowing_value = balance_sheet.loc[label].iloc[0]
+                break
+        # 规则：若两者都有值，取第一个（short_term_loan）；若只有一个有值，用那个值
+        chosen = loan_value if loan_value is not None else borrowing_value
+        if chosen is not None:
+            result["short_term_borrowing"] = chosen
     # 毛利率：从利润表计算（Gross Profit / Total Revenue）
     if not income_stmt.empty:
         if "Gross Profit" in income_stmt.index and "Total Revenue" in income_stmt.index:
             gross_profit = income_stmt.loc["Gross Profit"].iloc[0]
             total_revenue = income_stmt.loc["Total Revenue"].iloc[0]
             if total_revenue != 0:
-                result["gross_profit_margin"] = gross_profit / total_revenue
+                margin = gross_profit / total_revenue
+                # 毛利率按百分比字符串保存，例如 20%
+                result["gross_profit_margin"] = f"{margin:.0%}"
         if "Net Income" in income_stmt.index:
-            result["net_profit"] = income_stmt.loc["Net Income"].iloc[0]
+            result["net_profit"] = income_stmt.loc["Net Income"].iloc[0] # 净利润
     # 现金流：运营/投资现金流字段名称兼容
     if not cashflow.empty:
         if "Operating Cash Flow" in cashflow.index:
-            result["operating_cash_flow"] = cashflow.loc["Operating Cash Flow"].iloc[0]
+            result["operating_cash_flow"] = cashflow.loc["Operating Cash Flow"].iloc[0] # 经营现金流
         investing_labels = [
             "Investing Cash Flow",
             "Total Cash From Investing Activities",
@@ -221,20 +253,21 @@ def main():
 
     # 预先创建 Yahoo 字段，保证输出表结构包含这些列
     yahoo_cols = [
-        "website",
-        "total_share",
-        "pe",
-        "pb",
-        "roe",
-        "eps",
-        "bps",
-        "cash",
-        "short_term_loan",
-        "short_term_borrowing",
-        "gross_profit_margin",
-        "net_profit",
-        "operating_cash_flow",
-        "investment_cash_flow",
+        "website", # 公司官网
+        "total_share", # 总股本
+        "market_cap",# 市值
+        "price", # 收盘价
+        "pe",# 市盈率
+        "pb",# 市净率
+        "roe",# ROE
+        "eps",# 每股收益
+        "bps",# 每股净资产
+        "cash", # 现金总额
+        "short_term_borrowing", # 短期借款（兼容多个标签）
+        "gross_profit_margin", # 毛利率
+        "net_profit",# 净利润
+        "operating_cash_flow",# 经营现金流
+        "investment_cash_flow",# 投资现金流
     ]
     for col in yahoo_cols:
         if col not in df.columns:
