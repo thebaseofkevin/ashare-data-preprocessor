@@ -1,4 +1,5 @@
 """使用 Yahoo Finance 补充股票数据，并保存到新的 SQLite 数据库。"""
+
 import os
 import datetime
 import pandas as pd
@@ -253,28 +254,28 @@ def main():
 
     # 预先创建 Yahoo 字段，保证输出表结构包含这些列
     yahoo_cols = [
-        "website", # 公司官网
+        "website",     # 公司官网
         "total_share", # 总股本
-        "market_cap",# 市值
-        "price", # 当前股价
-        "pe",# 市盈率
-        "pb",# 市净率
-        "roe",# ROE
-        "eps",# 每股收益
-        "bps",# 每股净资产
-        "cash", # 现金总额
-        "short_term_borrowing", # 短期借款（兼容多个标签）
-        "gross_profit_margin", # 毛利率
-        "net_profit",# 净利润
-        "operating_cash_flow",# 经营现金流
-        "investment_cash_flow",# 投资现金流（兼容多个标签）
+        "market_cap",  # 市值
+        "price",       # 当前股价
+        "pe",          # 市盈率
+        "pb",          # 市净率
+        "roe",         # ROE
+        "eps",         # 每股收益
+        "bps",         # 每股净资产
+        "cash",        # 现金总额
+        "short_term_borrowing",  # 短期借款（兼容多个标签）
+        "gross_profit_margin",   # 毛利率
+        "net_profit",            # 净利润
+        "operating_cash_flow",   # 经营现金流
+        "investment_cash_flow",  # 投资现金流（兼容多个标签）
     ]
     for col in yahoo_cols:
         if col not in df.columns:
             df[col] = None
 
     # 数字格式化：支持数值与可转数字的字符串
-    def _format_num(val):
+    def _format_value(col, val):
         if not is_scalar(val):
             return val
         if pd.isna(val):
@@ -285,8 +286,12 @@ def main():
                 num = float(val)
             except Exception:
                 return val
+            if col == "roe":
+                return f"{num * 100:.2f}%"   # ROE 百分比显示
             return f"{num:,}"
         try:
+            if col == "roe":
+                return f"{val * 100:.2f}%"   # ROE 百分比显示
             return f"{val:,}"
         except Exception:
             return val
@@ -330,7 +335,7 @@ def main():
             # format numeric columns for this row
             row = df.loc[[idx]].copy()
             for col in row.columns:
-                row[col] = row[col].apply(_format_num)
+                row[col] = row[col].apply(lambda v: _format_value(col, v))
             # append to database
             row.to_sql("stocks", engine_out, if_exists="append", index=False)
 
@@ -340,9 +345,12 @@ def main():
             if processed % 200 == 0:
                 print(f"processed {processed} rows, sleeping 30 seconds...")
                 time.sleep(30)
-            if processed % 1000 == 0:
+            if processed % 500 == 0:
                 print(f"processed {processed} rows, sleeping 60 seconds...")
                 time.sleep(60)
+            if processed % 1000 == 0:
+                print(f"processed {processed} rows, sleeping 120 seconds...")
+                time.sleep(120)
 
     print(f"yahoo data filled for {yahoo_hits}/{total} rows")
     if yahoo_errors:
@@ -350,7 +358,6 @@ def main():
         for code, err in yahoo_errors:
             print(f"{code}: {err}")
     print(f"enriched and saved {len(df)} rows to {output_db} (table 'stocks')")
-
 
 if __name__ == '__main__':
     main()
