@@ -1,3 +1,5 @@
+# Gemini 生成的版本
+
 ## SQL 1.0 版本 ： 三步严选
 
 ### 1. 基础过滤：剔除“地雷”与平庸者
@@ -137,3 +139,318 @@ ORDER BY L_value ASC;
 这些被筛出的公司，往往正处于 **Phase C（Spring 弹簧）** 之后的 **LPS（最后支撑点）**。此时，浮动筹码已被洗净，基本面的韧性将成为股价重回 **Phase D** 上升通道的唯一动力。
 
 ---
+
+# Claude 生成的版本
+
+### 一、Phase 0 — 数据完整性预检（先跑这条）
+
+```sql
+-- 目的：排除数据残缺的标的，降级标记缺失项
+-- 对应：V3.1 Phase 0 信息校验
+SELECT
+    code,
+    code_name,
+    industry,
+    price,
+    market_cap,
+    pe,
+    pb,
+    roe,
+    net_profit,
+    operating_cash_flow,
+    cash,
+    short_term_borrowing,
+    -- 数据完整性评分（满分6分）
+    (
+        CASE WHEN price              IS NOT NULL AND price > 0              THEN 1 ELSE 0 END +
+        CASE WHEN market_cap         IS NOT NULL AND market_cap > 0         THEN 1 ELSE 0 END +
+        CASE WHEN net_profit         IS NOT NULL                            THEN 1 ELSE 0 END +
+        CASE WHEN operating_cash_flow IS NOT NULL                           THEN 1 ELSE 0 END +
+        CASE WHEN cash               IS NOT NULL AND cash >= 0              THEN 1 ELSE 0 END +
+        CASE WHEN roe                IS NOT NULL                            THEN 1 ELSE 0 END
+    ) AS data_score,
+    -- 缺失字段预警（对应报告中的[数据受限]标注）
+    CASE WHEN investment_cash_flow IS NULL THEN '[缺:投资CF]' ELSE '' END ||
+    CASE WHEN short_term_borrowing IS NULL THEN '[缺:短期借款]' ELSE '' END ||
+    CASE WHEN gross_profit_margin  IS NULL THEN '[缺:毛利率]' ELSE '' END
+    AS data_warning
+FROM stock_data
+WHERE price > 0
+  AND market_cap > 0
+ORDER BY data_score DESC;
+```
+
+---
+
+### 二、Phase 1 — 护城河初筛（段氏排雷）
+
+```sql
+-- 目的：对应 Phase 1.3 段氏排雷清单中可量化的项
+-- 核心逻辑：FCF质量 + 盈利能力 + 毛利率壁垒
+
+SELECT
+    code,
+    code_name,
+    industry,
+    price,
+    market_cap,
+    roe,
+    gross_profit_margin,
+    net_profit,
+    operating_cash_flow,
+    investment_cash_flow,
+
+    -- FCF 推算（保守近似：经营CF + 投资CF）
+    -- 注：投资CF通常为负值，相加即为简化版FCF
+    (operating_cash_flow + COALESCE(investment_cash_flow, 0)) AS fcf_approx,
+
+    -- FCF质量比（对应排雷清单第一条：FCF/净利润 > 80%）
+    CASE
+        WHEN net_profit > 0
+        THEN ROUND(
+            (operating_cash_flow + COALESCE(investment_cash_flow, 0)) / net_profit * 100,
+            1
+        )
+        ELSE NULL
+    END AS fcf_quality_pct,
+
+    -- 护城河信号：毛利率分层
+    CASE
+        WHEN CAST(REPLACE(gross_profit_margin, '%', '') AS FLOAT) >= 50 THEN '高壁垒(≥50%)'
+        WHEN CAST(REPLACE(gross_profit_margin, '%', '') AS FLOAT) >= 30 THEN '中等护城河'
+        WHEN CAST(REPLACE(gross_profit_margin, '%', '') AS FLOAT) >= 15 THEN '低护城河'
+        ELSE '红旗:毛利率过低'
+    END AS moat_signal
+
+FROM stock_data
+WHERE
+    price > 0
+    AND net_profit > 0                        -- 排除亏损股（初筛）
+    AND roe > 8                               -- ROE低于8%护城河存疑
+    AND operating_cash_flow > 0               -- 经营现金流为正（盈利质量基础门槛）
+    -- 段氏排雷：FCF/净利润 粗筛，过滤盈利注水嫌疑
+    AND (operating_cash_flow + COALESCE(investment_cash_flow, 0)) / NULLIF(net_profit, 0) > 0.5
+
+ORDER BY roe DESC, gross_profit_margin DESC;
+```
+
+---
+
+### 三、Phase 2 — 动态估值筛选（三档价格体系）
+
+```sql
+-- 目的：对应 Phase 2.2-2.4，计算净现金、EV、EV/FCF，输出三档价格信号
+-- 核心约束：现有数据只有短期借款，净现金为保守近似
+
+SELECT
+    s.code,
+    s.code_name,
+    s.industry,
+    s.price,
+    s.market_cap,
+    s.pe,
+    s.pb,
+    s.roe,
+    s.eps,
+
+    -- ① 净现金（保守版，仅减短期借款；长期债务未知，结果偏乐观）
+    (s.cash - COALESCE(s.short_term_borrowing, 0)) AS net_cash,
+
+    -- ② 含金量EV
+    (s.market_cap - (s.cash - COALESCE(s.short_term_borrowing, 0))) AS ev_approx,
+
+    -- ③ FCF 年化近似
+    (s.operating_cash_flow + COALESCE(s.investment_cash_flow, 0)) AS fcf_approx,
+
+    -- ④ EV/FCF（核心估值倍数，对应数据看板）
+    CASE
+        WHEN (s.operating_cash_flow + COALESCE(s.investment_cash_flow, 0)) > 0
+        THEN ROUND(
+            (s.market_cap - (s.cash - COALESCE(s.short_term_borrowing, 0)))
+            / (s.operating_cash_flow + COALESCE(s.investment_cash_flow, 0)),
+            1
+        )
+        ELSE NULL
+    END AS ev_fcf_ratio,
+
+    -- ⑤ 三档价格信号（基于当前PE与行业常态对比）
+    -- 保守安全价：基于净利润 × 12倍PE
+    ROUND(s.eps * 12, 2) AS conservative_price,
+    -- 合理估值价：基于净利润 × 20倍PE（消费/科技中轴）
+    ROUND(s.eps * 20, 2) AS fair_price,
+    -- 高估警戒价：基于净利润 × 30倍PE
+    ROUND(s.eps * 30, 2) AS caution_price,
+
+    -- ⑥ 当前安全边际（相对保守安全价）
+    CASE
+        WHEN s.eps > 0
+        THEN ROUND((s.eps * 12 - s.price) / s.price * 100, 1)
+        ELSE NULL
+    END AS margin_of_safety_pct,
+
+    -- ⑦ 估值区间裁决
+    CASE
+        WHEN s.pe <= 12                          THEN '🟢 深度低估区'
+        WHEN s.pe <= 20                          THEN '🟡 合理估值区'
+        WHEN s.pe <= 30                          THEN '🟠 偏高需谨慎'
+        WHEN s.pe > 30                           THEN '🔴 高估警戒区'
+        ELSE '无法判断'
+    END AS valuation_zone
+
+FROM stock_data s
+WHERE
+    s.price > 0
+    AND s.net_profit > 0
+    AND s.eps > 0
+    -- 只看EV/FCF低于35倍的标的（对应Phase 2.2动态乘数上限）
+    AND (
+        s.operating_cash_flow + COALESCE(s.investment_cash_flow, 0)
+    ) > 0
+
+ORDER BY ev_fcf_ratio ASC NULLS LAST;
+```
+
+---
+
+### 四、Phase 2 进阶 — 按行业类型分类估值
+
+```sql
+-- 目的：对应 Phase 2.1 估值工具选择矩阵，不同行业用不同估值逻辑
+
+-- 【金融类】用 PB + ROE 筛选（对应矩阵：金融 → PB+ROE均值回归）
+SELECT
+    code, code_name, industry, price, pe, pb, roe,
+    '金融类-PB估值' AS valuation_method,
+    CASE
+        WHEN pb < 1.0 AND roe > 10 THEN '🟢 PB低估+高ROE'
+        WHEN pb < 1.5 AND roe > 8  THEN '🟡 合理区间'
+        ELSE '偏贵或ROE不足'
+    END AS signal
+FROM stock_data
+WHERE industry IN ('银行', '保险', '证券', '多元金融')
+  AND price > 0
+
+UNION ALL
+
+-- 【消费/品牌类】用 ROE + 毛利率筛选（对应矩阵：消费 → DCF+品牌溢价）
+SELECT
+    code, code_name, industry, price, pe, pb, roe,
+    '消费类-ROE+毛利率' AS valuation_method,
+    CASE
+        WHEN roe > 20
+         AND CAST(REPLACE(gross_profit_margin, '%', '') AS FLOAT) > 40
+         AND pe < 35
+        THEN '🟢 高ROE+宽护城河'
+        WHEN roe > 15
+         AND pe < 25
+        THEN '🟡 合理成长定价'
+        ELSE '性价比不足'
+    END AS signal
+FROM stock_data
+WHERE industry IN ('白酒', '食品饮料', '家电', '医疗美容', '零售')
+  AND price > 0
+
+UNION ALL
+
+-- 【科技/硬件类】用 FCF 筛选（对应矩阵：科技/硬件 → 远期FCF年化）
+SELECT
+    code, code_name, industry, price, pe, pb, roe,
+    '科技类-FCF估值' AS valuation_method,
+    CASE
+        WHEN (operating_cash_flow + COALESCE(investment_cash_flow, 0)) > 0
+         AND (operating_cash_flow + COALESCE(investment_cash_flow, 0)) / NULLIF(market_cap, 0) > 0.04
+        THEN '🟢 FCF收益率>4%'
+        ELSE '⚠ FCF不足或景气度待确认'
+    END AS signal
+FROM stock_data
+WHERE industry IN ('半导体', '电子元器件', '通信设备', '计算机', '云计算', '人工智能')
+  AND price > 0
+
+ORDER BY industry, signal;
+```
+
+---
+
+### 五、Phase 1+2 联合 — 综合评分筛选（最终候选池）
+
+```sql
+-- 目的：整合护城河 + 估值 + FCF质量，输出综合评分，形成候选股票池
+-- 评分满分10分，直接对接 V3.1 最终裁决的仓位判断
+
+SELECT
+    code,
+    code_name,
+    industry,
+    price,
+    market_cap,
+    pe,
+    roe,
+    gross_profit_margin,
+    operating_cash_flow,
+    net_profit,
+
+    -- 综合评分（满10分）
+    (
+        -- 盈利质量（最高3分）
+        CASE WHEN net_profit > 0 AND operating_cash_flow / NULLIF(net_profit,0) > 0.8 THEN 3
+             WHEN net_profit > 0 AND operating_cash_flow / NULLIF(net_profit,0) > 0.5 THEN 2
+             WHEN net_profit > 0                                                       THEN 1
+             ELSE 0 END
+
+        -- 估值安全性（最高3分）
+        + CASE WHEN pe > 0 AND pe < 12  THEN 3
+               WHEN pe > 0 AND pe < 20  THEN 2
+               WHEN pe > 0 AND pe < 30  THEN 1
+               ELSE 0 END
+
+        -- 护城河质量（最高2分，毛利率代理）
+        + CASE WHEN CAST(REPLACE(COALESCE(gross_profit_margin,'0%'), '%', '') AS FLOAT) >= 40 THEN 2
+               WHEN CAST(REPLACE(COALESCE(gross_profit_margin,'0%'), '%', '') AS FLOAT) >= 20 THEN 1
+               ELSE 0 END
+
+        -- ROE质量（最高2分）
+        + CASE WHEN roe >= 20 THEN 2
+               WHEN roe >= 12 THEN 1
+               ELSE 0 END
+    ) AS composite_score,
+
+    -- 快速定性标签
+    CASE
+        WHEN (
+            net_profit > 0
+            AND operating_cash_flow / NULLIF(net_profit,0) > 0.8
+            AND pe < 20
+            AND roe > 15
+        ) THEN '【强力候选】进入深度研究'
+        WHEN (
+            net_profit > 0
+            AND pe < 30
+            AND roe > 10
+        ) THEN '【关注候选】待进一步核查'
+        ELSE '【暂不关注】'
+    END AS research_priority
+
+FROM stock_data
+WHERE
+    price > 0
+    AND market_cap > 0
+    AND net_profit > 0
+    AND operating_cash_flow > 0     -- 经营现金流必须为正
+    AND roe > 8                     -- 最低ROE门槛
+
+ORDER BY composite_score DESC, roe DESC
+LIMIT 50;  -- 控制候选池规模
+```
+
+---
+
+### 附：数据局限性备忘
+
+| V3.1 分析项 | 当前数据支持度 | 缺口与建议 |
+|---|---|---|
+| FCF 计算 | 约 70% | 缺 CAPEX 明细，用经营CF+投资CF近似 |
+| 净现金 | 约 60% | 仅有短期借款，缺长期债，结果偏乐观，需标注 `[数据受限]` |
+| 排雷清单 | 约 40% | 商誉、关联交易、研发资本化率均缺失 |
+| 威科夫量价 | 0% | 需接入行情数据库（日K线 + 成交量） |
+| 行业 CAPEX 增速 | 0% | 需接入行业数据或手工维护 |
+| 管线/催化剂 | 0% | 医药类需单独数据源 |
