@@ -47,12 +47,22 @@ class TestYahooEnrich(unittest.TestCase):
             index=["Cash And Cash Equivalents", "Short Term Debt"],
         )
         mock_ticker.financials = pd.DataFrame(
-            {0: [100000, 500000, 50000]},
-            index=["Gross Profit", "Total Revenue", "Net Income Continuous Operations"],
+            {0: [100000, 500000, 50000, 70000, 8000]},
+            index=[
+                "Gross Profit",
+                "Total Revenue",
+                "Net Income Continuous Operations",
+                "Operating Expense",
+                "Research And Development",
+            ],
         )
         mock_ticker.cashflow = pd.DataFrame(
-            {0: [150000, -50000]},
-            index=["Operating Cash Flow", "Capital Expenditures"],
+            {0: [150000, -50000, 25000]},
+            index=[
+                "Operating Cash Flow",
+                "Capital Expenditures",
+                "Financing Cash Flow",
+            ],
         )
 
         mock_yf.Ticker.return_value = mock_ticker
@@ -75,6 +85,9 @@ class TestYahooEnrich(unittest.TestCase):
         self.assertEqual(data["net_profit"], 50000)
         self.assertEqual(data["operating_cash_flow"], 150000)
         self.assertEqual(data["investment_cash_flow"], -50000)
+        self.assertEqual(data["financing_cash_flow"], 25000)
+        self.assertEqual(data["operating_expense"], 70000)
+        self.assertEqual(data["research_and_development"], 8000)
 
     @patch('yahoo_enrich.yf', None)
     def test_fetch_yahoo_no_yf(self):
@@ -90,6 +103,24 @@ class TestYahooEnrich(unittest.TestCase):
         data, err = fetch_yahoo("sh.600000")
         self.assertEqual(data, {})
         self.assertEqual(err, "Network error")
+
+    @patch('yahoo_enrich.yf')
+    def test_financing_cash_flow_alias(self, mock_yf):
+        """Test financing cash flow label compatibility."""
+        mock_ticker = MagicMock()
+        mock_ticker.get_info.return_value = {}
+        mock_ticker.fast_info = {}
+        mock_ticker.balance_sheet = pd.DataFrame()
+        mock_ticker.financials = pd.DataFrame()
+        mock_ticker.cashflow = pd.DataFrame(
+            {0: [12345]},
+            index=["Total Cash From Financing Activities"],
+        )
+        mock_yf.Ticker.return_value = mock_ticker
+
+        data, err = fetch_yahoo("sh.600000")
+        self.assertIsNone(err)
+        self.assertEqual(data["financing_cash_flow"], 12345)
 
 if __name__ == '__main__':
     unittest.main()
