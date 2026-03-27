@@ -42,6 +42,17 @@ _SHORT_TERM_BORROWING_LABELS = [
     "Short/Long Term Debt",
     "Short Long Term Debt",
 ]
+_LONG_TERM_DEBT_LABELS = [
+    "Long Term Debt",
+    "Long Term Debt And Capital Lease Obligation",
+    "Long Term Capital Lease Obligation",
+    "Long Term Loans",
+    "Non Current Debt",
+]
+_TOTAL_DEBT_LABELS = [
+    "Total Debt",
+    "Total Borrowings",
+]
 _OPERATING_EXPENSE_LABELS = [
     "Operating Expense",
     "Operating Expenses",
@@ -85,6 +96,7 @@ _YAHOO_COLS = [
     "bps",         # 每股净资产
     "cash",        # 现金总额
     "short_term_borrowing",  # 短期借款（兼容多个标签）
+    "interest_bearing_debt", # 全部有息负债，优先使用 totalDebt
     "gross_profit_margin",   # 毛利率
     "net_profit",            # 净利润
     "operating_expense",     # 营业费用
@@ -92,7 +104,10 @@ _YAHOO_COLS = [
     "operating_cash_flow",   # 经营现金流
     "investment_cash_flow",  # 投资现金流（兼容多个标签）
     "financing_cash_flow",   # 筹资现金流（兼容多个标签）
+    "value_lt_15",           # (market_cap - net_cash) / net_profit <= 15
 ]
+
+_MARKET_CAP_THRESHOLD_CNY = 20_000_000_000  # 200亿元人民币
 
 
 def _baostock_to_yahoo(code: str) -> str:
@@ -225,6 +240,20 @@ def fetch_yahoo(code: str):
     if chosen is not None:
         result["short_term_borrowing"] = chosen
 
+    # 有息负债：优先使用 Yahoo 汇总字段 totalDebt；缺失时退化为报表里的总债务或长短债之和
+    interest_bearing_debt = info.get("totalDebt")
+    if interest_bearing_debt is None:
+        total_debt = _get_first_match(balance_sheet, _TOTAL_DEBT_LABELS)
+        if total_debt is not None:
+            interest_bearing_debt = total_debt
+        else:
+            long_term_debt = _get_first_match(balance_sheet, _LONG_TERM_DEBT_LABELS)
+            debt_parts = [v for v in (chosen, long_term_debt) if v is not None]
+            if debt_parts:
+                interest_bearing_debt = sum(debt_parts)
+    if interest_bearing_debt is not None:
+        result["interest_bearing_debt"] = interest_bearing_debt
+
     # 利润表
     if not income_stmt.empty:
         gross_profit = _get_first_match(income_stmt, ["Gross Profit"])
@@ -270,6 +299,8 @@ def fetch_yahoo(code: str):
 
 
 def _format_value(col, val):
+    if col == "value_lt_15":
+        return val
     if not is_scalar(val):
         return val
     if pd.isna(val):
@@ -288,6 +319,38 @@ def _format_value(col, val):
         return f"{val:,}"
     except Exception:
         return val
+
+
+def _to_float(val):
+    if val is None:
+        return None
+    if isinstance(val, (int, float)):
+        return float(val)
+    if isinstance(val, str):
+        try:
+            return float(val.replace(",", "").strip())
+        except Exception:
+            return None
+    return None
+
+# （市值 - 净现金）/ 净利润 <= 15
+# 其中净现金 = 现金及现金等价物 - 全部有息负债
+# 只在净利润为正时给出结果，避免把经营现金流混入利润估值口径
+def _calc_value_lt_15(row) -> bool | None:
+    market_cap = _to_float(row.get("market_cap"))
+    cash = _to_float(row.get("cash"))
+    interest_bearing_debt = _to_float(row.get("interest_bearing_debt"))
+    net_profit = _to_float(row.get("net_profit"))
+
+    if market_cap is None or cash is None or net_profit is None or net_profit <= 0:
+        return None
+
+    if interest_bearing_debt is None:
+        interest_bearing_debt = 0.0
+
+    net_cash = cash - interest_bearing_debt
+    ratio = (market_cap - net_cash) / net_profit
+    return ratio <= 15
 
 
 def main():
@@ -332,6 +395,8 @@ def main():
 
     yahoo_hits = 0
     yahoo_empty = 0
+    skipped_by_market_cap = 0
+    written_rows = 0
     yahoo_errors = []
 
     with ThreadPoolExecutor(max_workers=3) as executor:
@@ -340,6 +405,12 @@ def main():
         for future in as_completed(futures):
             idx, yahoo_data, err = future.result()
             processed += 1
+
+            market_cap = _to_float(yahoo_data.get("market_cap")) if yahoo_data else None
+            # 先判断市值：market_cap > 200亿元人民币 时跳过不考虑
+            if market_cap is not None and market_cap > _MARKET_CAP_THRESHOLD_CNY:
+                skipped_by_market_cap += 1
+                continue
 
             if yahoo_data:
                 yahoo_hits += 1
@@ -353,27 +424,21 @@ def main():
                     df.at[idx, key] = value
                 except Exception:
                     pass
+            df.at[idx, "value_lt_15"] = _calc_value_lt_15(df.loc[idx])
 
             row_df = df.loc[[idx]].copy()
             for col in row_df.columns:
                 row_df[col] = row_df[col].apply(lambda v: _format_value(col, v))
             row_df.to_sql("stocks", engine_out, if_exists="append", index=False)
-
-            if processed % 100 == 0 or processed == total:
-                print(f"processed {processed}/{total} rows")
-            if processed % 200 == 0:
-                print(f"processed {processed} rows, sleeping 30 seconds...")
-                time.sleep(30)
-            if processed % 500 == 0:
-                print(f"processed {processed} rows, sleeping 60 seconds...")
-                time.sleep(60)
+            written_rows += 1
 
     print(f"yahoo data filled for {yahoo_hits}/{total} rows")
     if yahoo_errors:
         print("sample yahoo errors:")
         for code, err in yahoo_errors:
             print(f"{code}: {err}")
-    print(f"enriched and saved {len(df)} rows to {output_db} (table 'stocks')")
+    print(f"rows skipped by market_cap > 200亿: {skipped_by_market_cap}")
+    print(f"enriched and saved {written_rows} rows to {output_db} (table 'stocks')")
 
 
 if __name__ == '__main__':
